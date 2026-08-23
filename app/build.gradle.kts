@@ -31,8 +31,8 @@ android {
         // the DisplayManager APIs used to detect the glasses as a secondary display.
         minSdk = 34
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             // arm64-v8a only: Pixel 10 and Viture XR Pro are both 64-bit ARM devices.
