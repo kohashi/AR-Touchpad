@@ -44,8 +44,8 @@ There are no unit or instrumented tests (`src/test` and `src/androidTest` don't 
 - For release builds, add signing keys to `local.properties`: `KEYSTORE_PATH`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`
 
 Runtime on device:
-- [Shizuku](https://shizuku.rikka.app/) running (grants shell uid = `input` group = `/dev/uinput` access)
-- Accessibility Service enabled in Settings → Accessibility → AR Touchpad
+- Accessibility Service enabled in Settings → Accessibility → AR Touchpad (required — enough on its own to run the touchpad)
+- [Shizuku](https://shizuku.rikka.app/) running (optional upgrade: grants shell uid = `input` group = `/dev/uinput` access for the full-fidelity uinput backend)
 
 ## Architecture
 
@@ -58,11 +58,38 @@ app/src/main/
   java/…/
     MouseService.kt                  — Shizuku UserService (shell uid): owns the uinput fd
     ShizukuMouseController.kt        — App-side: binds/unbinds MouseService, rate-limits IPC to ~60 Hz
-    TouchpadViewModel.kt             — State, display detection, gesture dispatch, smoothing filter
+    TouchpadViewModel.kt             — State, display detection, backend selection, gesture dispatch, smoothing filter
     UinputNative.kt                  — Kotlin object declaring external JNI functions
-    TouchpadAccessibilityService.kt  — Handles nav bar actions; detects external text focus
+    TouchpadAccessibilityService.kt  — Accessibility backend: dispatchGesture injection + software
+                                       cursor overlay; also nav bar actions and external text focus
     ui/TouchpadScreen.kt             — Compose UI: status bar, touch surface, keyboard proxy, nav bar
 ```
+
+### Input backends
+
+`TouchpadViewModel.refresh()` picks an `InputBackend` each time state changes: `SHIZUKU` when the
+Shizuku UserService is bound (best fidelity), else `ACCESSIBILITY` when the accessibility service
+is enabled, else `NONE`. Every input operation (`moveCursor`, clicks, scroll, pinch, select drag,
+`pressKey`, `typeText`) routes through this selection, so the touchpad works with only the
+accessibility permission — no wireless debugging.
+
+The accessibility backend (`TouchpadAccessibilityService`):
+- Injects taps/long-presses/drags with `dispatchGesture`, targeted at the glasses via
+  `GestureDescription.Builder.setDisplayId` (public API since 30).
+- Draws a software cursor as a `TYPE_ACCESSIBILITY_OVERLAY` window created through a window
+  context on the external display (no SYSTEM_ALERT_WINDOW needed). Position updates are
+  coalesced to ~120 Hz.
+- Serializes all gestures through a queue: `dispatchGesture` cancels any in-flight gesture, and
+  continued strokes (`StrokeDescription.willContinue`) — used for two-finger scrolling
+  (content-drag with edge re-anchoring) and long-press select drags — die if an unrelated
+  gesture is dispatched while the synthetic finger is down.
+- Scroll sign/scale: ViewModel converts wheel-style deltas to content-drag pixels
+  (`A11Y_SCROLL_PX_PER_UNIT`, negated — see comment in `performScroll`).
+- Text is injected with `ACTION_SET_TEXT` (append) + `ACTION_IME_ENTER` on the input-focused
+  node (searched via `windowsOnAllDisplays` on the glasses display first); select-drag
+  auto-copy uses `ACTION_COPY`. Nav keys map to `performGlobalAction`.
+- No shell access → `setDisplayImePolicy` is unavailable; `dexKeyboardActive` is forced false
+  and the keyboard proxy strip is the text path.
 
 ### Data flow
 

@@ -42,6 +42,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pgratz.artouchpad.DisplayInfo
+import com.pgratz.artouchpad.InputBackend
 import com.pgratz.artouchpad.TouchMode
 import com.pgratz.artouchpad.TouchpadViewModel
 import kotlin.math.abs
@@ -84,6 +85,8 @@ fun TouchpadScreen(viewModel: TouchpadViewModel) {
         StatusBar(
             shizukuAvailable = state.shizukuAvailable,
             shizukuPermission = state.shizukuPermission,
+            shizukuConnected = state.shizukuConnected,
+            backend = state.backend,
             mouseReady = state.mouseReady,
             serviceEnabled = state.isServiceEnabled,
             targetDisplay = state.targetDisplay,
@@ -106,6 +109,7 @@ fun TouchpadScreen(viewModel: TouchpadViewModel) {
                 naturalScroll = state.naturalScroll,
                 dexKeyboard = state.dexKeyboardEnabled,
                 dexKeyboardActive = state.dexKeyboardActive,
+                backend = state.backend,
                 allDisplays = state.allDisplays,
                 targetDisplay = state.targetDisplay,
                 onSensitivity = viewModel::setSensitivity,
@@ -145,13 +149,16 @@ fun TouchpadScreen(viewModel: TouchpadViewModel) {
     }
 }
 
-// Top status bar showing the app title, three status dots (Mouse/Display/Nav),
-// the current touch mode indicator, and contextual action buttons for each
-// unmet setup step (grant Shizuku → connect mouse → enable accessibility service).
+// Top status bar showing the app title, three status dots (Mouse/Display/Nav), the active
+// backend, the current touch mode indicator, and contextual action buttons. The
+// accessibility service alone is enough to run the touchpad (no wireless debugging);
+// Shizuku is offered as an optional upgrade for full mouse fidelity.
 @Composable
 private fun StatusBar(
     shizukuAvailable: Boolean,
     shizukuPermission: Boolean,
+    shizukuConnected: Boolean,
+    backend: InputBackend,
     mouseReady: Boolean,
     serviceEnabled: Boolean,
     targetDisplay: DisplayInfo?,
@@ -175,6 +182,11 @@ private fun StatusBar(
                     StatusDot(mouseReady, "Mouse")
                     StatusDot(targetDisplay != null, "Display")
                     StatusDot(serviceEnabled, "Nav")
+                    when (backend) {
+                        InputBackend.SHIZUKU -> Text("via Shizuku", color = TEXT_MUTED, fontSize = 11.sp)
+                        InputBackend.ACCESSIBILITY -> Text("via A11y", color = TEXT_MUTED, fontSize = 11.sp)
+                        InputBackend.NONE -> {}
+                    }
                     val modeLabel = when (touchMode) {
                         TouchMode.SCROLL -> "↕ scroll"
                         TouchMode.SELECT -> "⊹ select"
@@ -186,17 +198,25 @@ private fun StatusBar(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 when {
-                    !shizukuAvailable ->
-                        Text("Shizuku off", color = Color(0xFFFF7043), fontSize = 11.sp)
-                    !shizukuPermission ->
-                        TextButton(onClick = onGrantShizuku, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                            Text("Grant Shizuku", color = Color(0xFFFF7043), fontSize = 12.sp)
+                    // Nothing works yet: the accessibility service is the zero-setup path
+                    // (no wireless debugging), so it's the primary call to action.
+                    !serviceEnabled && backend == InputBackend.NONE ->
+                        TextButton(onClick = onEnableService, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                            Text("Enable Service", color = Color(0xFFFF7043), fontSize = 12.sp)
                         }
-                    !mouseReady ->
+                    // Running on the accessibility backend — offer the Shizuku upgrade
+                    // (real mouse cursor, wheel scrolling) when its daemon is reachable.
+                    backend == InputBackend.ACCESSIBILITY && shizukuAvailable && !shizukuPermission ->
+                        TextButton(onClick = onGrantShizuku, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
+                            Text("Grant Shizuku", color = Color(0xFFFFB300), fontSize = 12.sp)
+                        }
+                    backend == InputBackend.ACCESSIBILITY && shizukuAvailable && shizukuPermission && !shizukuConnected ->
                         TextButton(onClick = onConnectMouse, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
                             Text("Connect", color = Color(0xFFFFB300), fontSize = 12.sp)
                         }
-                    !serviceEnabled ->
+                    // Shizuku drives input but the service is off: nav bar + text focus
+                    // detection still need it.
+                    backend == InputBackend.SHIZUKU && !serviceEnabled ->
                         TextButton(onClick = onEnableService, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
                             Text("Enable Nav", color = Color(0xFFFFB300), fontSize = 12.sp)
                         }
@@ -430,7 +450,8 @@ private fun TouchpadSurface(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Touchpad Disabled", color = TEXT_MUTED, fontSize = 18.sp)
                 Spacer(modifier = Modifier.height(4.dp))
-                Text("Grant Shizuku permission to activate", color = Color(0xFF37474F), fontSize = 14.sp)
+                Text("Enable the Accessibility Service to activate", color = Color(0xFF37474F), fontSize = 14.sp)
+                Text("(or grant Shizuku for full mouse fidelity)", color = Color(0xFF37474F), fontSize = 12.sp)
             }
         }
     }
@@ -544,6 +565,7 @@ private fun SettingsPanel(
     naturalScroll: Boolean,
     dexKeyboard: Boolean,
     dexKeyboardActive: Boolean,
+    backend: InputBackend,
     allDisplays: List<DisplayInfo>,
     targetDisplay: DisplayInfo?,
     onSensitivity: (Float) -> Unit,
@@ -604,6 +626,8 @@ private fun SettingsPanel(
                     when {
                         dexKeyboard && dexKeyboardActive ->
                             "Glasses text fields open the phone keyboard (DeX style)"
+                        dexKeyboard && backend == InputBackend.ACCESSIBILITY ->
+                            "Needs Shizuku — using proxy keyboard instead"
                         dexKeyboard && targetDisplay != null ->
                             "Not supported on this device — using proxy keyboard"
                         else ->

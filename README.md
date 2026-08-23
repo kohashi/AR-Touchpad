@@ -4,7 +4,10 @@ An Android app that turns your phone's touchscreen into a trackpad for controlli
 
 ## How it works
 
-The glasses connect via USB-C DisplayPort and appear as a second display in Android's desktop mode. This app creates a virtual mouse device using the Linux `uinput` subsystem (via [Shizuku](https://shizuku.rikka.app/)), so Android sees it as a real hardware mouse and shows a proper system cursor on the glasses display.
+The glasses connect via USB-C DisplayPort and appear as a second display in Android's desktop mode. The app drives that display through one of two backends, picked automatically:
+
+- **Accessibility backend (default, zero extra setup)** — with only the Accessibility Service enabled, the app synthesizes touch gestures on the glasses display (`dispatchGesture` targeted at the external display) and draws its own software cursor as an accessibility overlay. No Shizuku, no wireless debugging.
+- **Shizuku backend (optional upgrade)** — when [Shizuku](https://shizuku.rikka.app/) is running, the app creates a virtual mouse device using the Linux `uinput` subsystem, so Android sees a real hardware mouse and shows a proper system cursor, with real wheel scrolling and key injection (including the DeX-style phone keyboard).
 
 - **Single-finger drag** — moves the cursor
 - **Tap** — left click
@@ -19,15 +22,15 @@ The glasses connect via USB-C DisplayPort and appear as a second display in Andr
 |---|---|
 | Android | 14+ (minSdk 34) |
 | Architecture | arm64-v8a |
-| [Shizuku](https://shizuku.rikka.app/) | Running via Wireless Debugging or root |
-| Accessibility Service | Must be enabled in Settings for nav buttons |
+| Accessibility Service | Must be enabled in Settings (drives the touchpad and nav buttons) |
+| [Shizuku](https://shizuku.rikka.app/) | *Optional* — running via Wireless Debugging or root, for full mouse fidelity |
 
 Tested on **Pixel 10 + Viture XR Pro** running Android 16.
 
 ## Setup
 
-### 1. Enable Shizuku
-Follow the [Shizuku guide](https://shizuku.rikka.app/guide/setup/) to start Shizuku via Wireless Debugging (no root required):
+### 1. (Optional) Enable Shizuku
+The app works without Shizuku — the Accessibility Service alone is enough. For the highest-fidelity mode (real OS cursor, wheel scrolling, DeX-style keyboard), follow the [Shizuku guide](https://shizuku.rikka.app/guide/setup/) to start Shizuku via Wireless Debugging (no root required):
 
 1. Enable **Developer Options** → **Wireless Debugging**
 2. Run `adb tcpip 5555` and `adb connect <phone-ip>`
@@ -43,8 +46,8 @@ cd AR-Touchpad
 ```
 
 ### 3. Grant permissions
-- Open the app → tap **Grant** when Shizuku asks for permission
-- Enable the **AR Touchpad** Accessibility Service in **Settings → Accessibility**
+- Enable the **AR Touchpad** Accessibility Service in **Settings → Accessibility** (required)
+- If using Shizuku: open the app → tap **Grant Shizuku** when prompted (optional)
 
 ### 4. Connect the glasses
 Plug in the Viture XR Pro. Pull down the notification shade and switch to **Desktop / Extended** mode (not Mirror). The app's status bar shows all detected displays — the glasses should appear as a second display.
