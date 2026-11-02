@@ -31,14 +31,9 @@ android {
         // the DisplayManager APIs used to detect the glasses as a secondary display.
         minSdk = 34
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "2.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        ndk {
-            // arm64-v8a only: Pixel 10 and Viture XR Pro are both 64-bit ARM devices.
-            // Omitting x86/x86_64 keeps the APK small and avoids cross-compiling uinput_jni.
-            abiFilters += "arm64-v8a"
-        }
     }
 
     buildTypes {
@@ -63,22 +58,6 @@ android {
 
     buildFeatures {
         compose = true
-        // aidl: generates IMouseService Java stubs from IMouseService.aidl, used for
-        // IPC between the app process and the Shizuku UserService (MouseService).
-        aidl = true
-    }
-
-    lint {
-        // BlockedPrivateApi: we deliberately access InputManagerGlobal.injectInputEvent and
-        // InputEvent.setDisplayId via reflection, bypassed at runtime by HiddenApiBypass.
-        disable += "BlockedPrivateApi"
-    }
-
-    externalNativeBuild {
-        cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
     }
 }
 
@@ -93,13 +72,6 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.material)
-    // Shizuku: lets the app bind MouseService as a shell-uid UserService so it can
-    // access /dev/uinput and inject input events without root.
-    implementation(libs.shizuku.api)
-    implementation(libs.shizuku.provider)
-    // HiddenApiBypass: allows reflection access to InputManagerGlobal.injectInputEvent
-    // and InputEvent.setDisplayId, which are restricted hidden APIs on Android 9+.
-    implementation(libs.hiddenapibypass)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 }

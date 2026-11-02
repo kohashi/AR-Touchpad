@@ -24,19 +24,10 @@
             </intent-filter>
         </activity>
 
-        <!-- Shizuku content provider: required by the Shizuku library to communicate with
-             the Shizuku daemon. It handles the binder handshake so our app can bind
-             MouseService as a shell-uid UserService without needing root. -->
-        <provider
-            android:name="rikka.shizuku.ShizukuProvider"
-            android:authorities="${applicationId}.shizuku"
-            android:exported="true"
-            android:multiprocess="false"
-            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
-
-        <!-- Accessibility service used to dispatch touch gestures and detect text-field
-             focus on the glasses display. Gestures require BIND_ACCESSIBILITY_SERVICE;
-             configuration details are in res/xml/accessibility_service_config.xml. -->
+        <!-- The app's only input backend: draws the cursor overlay on the glasses display,
+             dispatches touch gestures there, inserts text into focused fields and performs
+             Back/Home/Recents. Needs no ADB, Shizuku, root or developer options.
+             Configuration details are in res/xml/accessibility_service_config.xml. -->
         <service
             android:name=".TouchpadAccessibilityService"
             android:exported="true"

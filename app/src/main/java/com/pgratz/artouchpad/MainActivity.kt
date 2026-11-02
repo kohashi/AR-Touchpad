@@ -38,8 +38,8 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // Re-checks display and Shizuku state when returning from Settings or the permission
-    // dialog, so the UI reflects any changes the user made while away.
+    // Re-checks display and accessibility-service state when returning from Settings,
+    // so the UI reflects any changes the user made while away.
     override fun onResume() {
         super.onResume()
         viewModel.refresh()

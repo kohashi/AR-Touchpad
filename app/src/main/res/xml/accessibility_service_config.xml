@@ -7,13 +7,15 @@
 
   accessibilityFlags:
     flagReportViewIds            — lets us read source.window.displayId to identify the glasses.
-    flagRetrieveInteractiveWindows — required to see windows on non-default (glasses) displays.
+    flagRetrieveInteractiveWindows — required to see windows on non-default (glasses) displays
+                                     (windowsOnAllDisplays) and to find the focused text field.
 
   canPerformGestures="true"
-      Required to dispatch tap/swipe gestures via dispatchGesture().
+      Required to dispatch tap/drag/pinch gestures via dispatchGesture() on the glasses display.
 
   canRetrieveWindowContent="true"
-      Required to read source.window and source.isEditable from accessibility events.
+      Required to read source.window / isEditable and to run paste / set-text / IME-enter
+      actions on the focused field.
 -->
 <accessibility-service
     xmlns:android="http://schemas.android.com/apk/res/android"

@@ -7,9 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 An Android app that turns a phone's touchscreen into a trackpad for Android desktop mode on Viture XR Pro glasses (or any USB-C DisplayPort display). Tested on Pixel 10 + Viture XR Pro running Android 16.
 
 - **Package:** `com.pgratz.artouchpad`
-- **Min SDK:** 34 (Android 14), target arm64-v8a only
-- **Language:** Kotlin + C++ (JNI)
+- **Min SDK:** 34 (Android 14)
+- **Language:** Kotlin only (no native code)
 - **UI:** Jetpack Compose + Material3
+
+The app deliberately depends on **nothing privileged**: no ADB / Wireless Debugging, no Shizuku, no root, no hidden APIs. Everything goes through the public `AccessibilityService` API. Keep it that way — enabling debugging on the phone breaks banking apps for the user, which is why the earlier uinput/Shizuku backend was removed.
 
 ## Build Commands
 
@@ -32,59 +34,52 @@ Run from the project root (where `gradlew` lives):
 ./gradlew clean
 ```
 
-The NDK CMake build compiles `libartouchpad.so` automatically alongside the Kotlin build.
-
 There are no unit or instrumented tests (`src/test` and `src/androidTest` don't exist); verification is manual on device.
 
 ## Setup Requirements
 
-- Android Studio (provides SDK, NDK, Gradle)
-- NDK r25+ (installed via Android Studio SDK Manager)
-- `local.properties` at project root with `sdk.dir=/home/pgratz/Android/Sdk`
+- Android Studio (provides SDK and Gradle); no NDK needed
+- `local.properties` at project root with `sdk.dir=<path to Android SDK>`
 - For release builds, add signing keys to `local.properties`: `KEYSTORE_PATH`, `KEYSTORE_PASSWORD`, `KEY_ALIAS`, `KEY_PASSWORD`
 
 Runtime on device:
-- [Shizuku](https://shizuku.rikka.app/) running (grants shell uid = `input` group = `/dev/uinput` access)
 - Accessibility Service enabled in Settings → Accessibility → AR Touchpad
+- Glasses connected in Desktop / Extended mode
 
 ## Architecture
 
-The app has two processes: the normal app process and a Shizuku UserService process (shell uid).
+Single process. The accessibility service is the only input backend.
 
 ```
 app/src/main/
-  aidl/…/IMouseService.aidl         — Binder interface between app and Shizuku service
-  cpp/uinput_jni.cpp                 — JNI: opens /dev/uinput, calls ioctl, writes input_events
   java/…/
-    MouseService.kt                  — Shizuku UserService (shell uid): owns the uinput fd
-    ShizukuMouseController.kt        — App-side: binds/unbinds MouseService, rate-limits IPC to ~60 Hz
-    TouchpadViewModel.kt             — State, display detection, gesture dispatch, smoothing filter
-    UinputNative.kt                  — Kotlin object declaring external JNI functions
-    TouchpadAccessibilityService.kt  — Handles nav bar actions; detects external text focus
+    TouchpadAccessibilityService.kt  — Cursor overlay on the external display, gesture dispatch,
+                                        text insertion, global nav actions, text-focus detection
+    TouchpadViewModel.kt             — State, display detection, smoothing filter, delegates to the service
+    MainActivity.kt                  — Single-activity host
     ui/TouchpadScreen.kt             — Compose UI: status bar, touch surface, keyboard proxy, nav bar
+  res/xml/accessibility_service_config.xml — canPerformGestures, canRetrieveWindowContent, window flags
 ```
 
 ### Data flow
 
-1. `TouchpadSurface` (Compose) intercepts raw pointer events and classifies them into gestures (tap, drag, two-finger scroll/pinch, long-press-drag for text select).
+1. `TouchpadSurface` (Compose) intercepts raw pointer events and classifies them into gestures (tap, double tap, long press, long-press drag, two-finger scroll or pinch — the two-finger mode is locked per contact).
 2. Gesture callbacks hit `TouchpadViewModel`, which applies velocity-adaptive exponential smoothing to cursor movement and maintains `TouchpadState` via `StateFlow`.
-3. `TouchpadViewModel` delegates to `ShizukuMouseController`, which rate-limits IPC to ~60 Hz (accumulating deltas between frames) and calls through to `IMouseService`.
-4. `MouseService` (shell uid) either writes `input_event` structs to `/dev/uinput` (for cursor/scroll/button) or uses `InputManagerGlobal.injectInputEvent` reflection (for key events and Ctrl+scroll zoom).
+3. `TouchpadViewModel` calls `TouchpadAccessibilityService.instance` directly (same process, main thread).
+4. The service moves the overlay cursor and dispatches gestures on the target display.
 
 ### Key design constraints
 
-**JNI for uinput:** Android 16 removed the generic `Os.ioctl(fd, req, value)` variant. The JNI bridge in `uinput_jni.cpp` is the only reliable way to call `ioctl` with an arbitrary value argument for `UI_SET_EVBIT`, `UI_SET_RELBIT`, etc.
+**Cursor overlay:** `attachOverlay()` builds a window context for the external display (`createDisplayContext(display).createWindowContext(TYPE_ACCESSIBILITY_OVERLAY, null)`) and adds a full-screen, `FLAG_NOT_TOUCHABLE | FLAG_NOT_FOCUSABLE` view that draws the pointer. Not-touchable is essential so dispatched gestures pass through. The overlay is re-attached whenever the target display changes and the cursor hides after 4 s idle.
 
-**Reflection for key injection:** `InputManagerGlobal.injectInputEvent` and `InputEvent.setDisplayId` are hidden APIs. They're accessed via reflection, gated by HiddenApiBypass library, and lint suppression is set in `build.gradle.kts` (`BlockedPrivateApi`).
+**Gesture targeting:** every `GestureDescription` sets `setDisplayId(targetDisplayId)` (public since API 30). Coordinates are display pixels of that display.
 
-**Shizuku UserService versioning:** `userServiceArgs.version(17)` in `ShizukuMouseController` is bumped whenever the `IMouseService.aidl` interface changes (adding methods). AIDL method IDs are explicit integers — new methods must append to avoid breaking existing bindings. `destroy() = 16777114` is Shizuku's reserved destroy transaction ID; never renumber it.
+**Continuous gestures:** `DragSession` holds one or two synthetic fingers down and chains `StrokeDescription.continueStroke()` segments (`DRAG_SEGMENT_MS` each). Only one continuation is in flight at a time; movement arriving meanwhile is coalesced into the next segment. `end()` finishes with a short stationary stroke (`LIFT_HOLD_MS`) and `willContinue=false`, so lifting does not fling. A scroll re-plants its finger at the cursor once it has travelled 35 % of the display's shorter side so it never runs off the edge. A pinch is two fingers centred on the cursor, horizontal, spanning `pinchSpan`.
 
-**Cursor-to-display association:** `MouseService.setDisplay()` pins the uinput device to the target display via `InputManagerGlobal.setInputDeviceDisplayAssociation` (reflection, with a fallback through the raw `IInputManager` binder in the `mIm` field). Without this, Android may route the virtual mouse to the phone's display. The device is found by scanning `InputDevice`s for the name `"AR Touchpad Mouse"` after a 400 ms registration delay.
+**Long press / selection:** when the phone-side long press fires (600 ms), `beginPress()` touches down at the cursor and holds `PRESS_HOLD_MS` (> the system 400 ms long-press timeout). Releasing without moving ends the press → long press on the glasses (context menu). Moving first drags the held finger → selection/drag; release then runs `ACTION_COPY` on the focused node.
 
-**Two-finger gesture disambiguation:** `TouchpadSurface` compares `|dSpan|` vs `|dx| + |dy|` each frame to decide pinch vs. scroll. Pinch threshold crossing triggers `Ctrl+scroll` MotionEvents (200 px per detent) for content-level zoom in Chrome/WebView.
+**Text input:** a field focused on the glasses (`TYPE_VIEW_FOCUSED` with `window.displayId != DEFAULT_DISPLAY`) opens the phone-side `EditText` strip. On send, `typeText()` finds the input-focused editable node among `windowsOnAllDisplays[targetDisplayId]`, tries `ACTION_PASTE` (honours caret) then `ACTION_SET_TEXT` (append), restores the previous clipboard, and `pressImeEnter()` fires `ACTION_IME_ENTER`. There is no key injection of any kind.
 
-**Text selection flow:** Long-press (600 ms, haptic) → drag moves cursor with `BTN_LEFT` held → release calls `mouseUp()` + `pressKeyWithCtrl(KEYCODE_C)` to auto-copy. A second finger during select drag cancels selection (`onSelectEnd()`).
+**Navigation:** Back/Home/Recents are `performGlobalAction()`; they act on the focused display.
 
-**Text input (two paths):** Primary is DeX-style direct typing: `MouseService.setImePolicy` calls `IWindowManager.setDisplayImePolicy(displayId, FALLBACK)` via reflection (shell uid holds the required `INTERNAL_SYSTEM_WINDOW` permission; there is no `wm` shell subcommand for this), so a field focused on the glasses shows Gboard on the phone while the InputConnection stays with the field — every keystroke lands directly. Applied in `TouchpadViewModel.applyImePolicy` when the external display is detected, gated by the persisted `dexKeyboardEnabled` preference, restored to `local` in `onCleared()`. `dexKeyboardActive` in state reflects whether the call actually worked on this build. Fallback (when the command is unsupported or the toggle is off): the keyboard proxy — an editable-field focus on the glasses (detected via `AccessibilityEvent.TYPE_VIEW_FOCUSED` with `window.displayId != DEFAULT_DISPLAY`) shows a phone-side `EditText` strip; text accumulates on the phone, then is injected via `typeText` + `pressKey(ENTER)` after a 200 ms IME teardown delay, with a delayed BACK press dismissing the glasses-side IME.
-
-**Settings persistence:** `sensitivity` (default 0.5), `scrollSpeed`, `naturalScroll`, and `dexKeyboardEnabled` live in SharedPreferences `touchpad_prefs`, loaded into the initial `TouchpadState` and written in the ViewModel setters.
+**Settings persistence:** `sensitivity` (default 0.5), `scrollSpeed`, and `naturalScroll` live in SharedPreferences `touchpad_prefs`, loaded into the initial `TouchpadState` and written in the ViewModel setters. With natural scroll off, the glasses finger moves opposite to the phone fingers (traditional trackpad); on, it follows them.
