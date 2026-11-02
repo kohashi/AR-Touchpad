@@ -14,9 +14,9 @@
 
 package com.pgratz.artouchpad.ui
 
+import android.accessibilityservice.AccessibilityService
 import android.content.Intent
 import android.provider.Settings
-import android.view.KeyEvent as AKeyEvent
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
@@ -66,6 +66,8 @@ private const val MOVE_THRESHOLD = 5f
 private const val TAP_MAX_MS = 220L
 private const val LONG_PRESS_MS = 600L
 private const val DOUBLE_TAP_WINDOW_MS = 300L
+// Accumulated two-finger motion (px) before the contact is locked to scroll or pinch.
+private const val TWO_FINGER_DECIDE_PX = 14f
 
 // Root composable. Collects ViewModel state and renders either SettingsPanel (when
 // showSettings is true) or the main layout: StatusBar → TouchpadSurface → optional
@@ -82,19 +84,15 @@ fun TouchpadScreen(viewModel: TouchpadViewModel) {
             .systemBarsPadding(),
     ) {
         StatusBar(
-            shizukuAvailable = state.shizukuAvailable,
-            shizukuPermission = state.shizukuPermission,
-            mouseReady = state.mouseReady,
+            inputReady = state.inputReady,
             serviceEnabled = state.isServiceEnabled,
             targetDisplay = state.targetDisplay,
             touchMode = state.touchMode,
             onSettingsClick = viewModel::toggleSettings,
-            onGrantShizuku = viewModel::requestShizukuPermission,
-            onConnectMouse = { viewModel.mouse.bind() },
             onEnableService = {
                 context.startActivity(
-                    android.content.Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 )
             },
         )
@@ -104,29 +102,27 @@ fun TouchpadScreen(viewModel: TouchpadViewModel) {
                 sensitivity = state.sensitivity,
                 scrollSpeed = state.scrollSpeed,
                 naturalScroll = state.naturalScroll,
-                dexKeyboard = state.dexKeyboardEnabled,
-                dexKeyboardActive = state.dexKeyboardActive,
                 allDisplays = state.allDisplays,
                 targetDisplay = state.targetDisplay,
                 onSensitivity = viewModel::setSensitivity,
                 onScrollSpeed = viewModel::setScrollSpeed,
                 onNaturalScroll = viewModel::setNaturalScroll,
-                onDexKeyboard = viewModel::setDexKeyboard,
                 onDismiss = viewModel::toggleSettings,
             )
         } else {
             TouchpadSurface(
                 modifier = Modifier.weight(1f),
-                enabled = state.mouseReady,
+                enabled = state.inputReady,
+                serviceEnabled = state.isServiceEnabled,
                 onMoveCursor = viewModel::moveCursor,
                 onClick = { viewModel.performClick() },
                 onDoubleClick = { viewModel.performDoubleClick() },
-                onRightClick = { viewModel.performRightClick() },
+                onLongPress = { viewModel.startLongPress() },
+                onLongPressRelease = viewModel::endLongPress,
                 onScroll = viewModel::performScroll,
                 onPinch = viewModel::pinchZoom,
+                onTwoFingerEnd = { viewModel.endTwoFinger() },
                 onTouchModeChanged = viewModel::setTouchMode,
-                onSelectStart = viewModel::startSelectDrag,
-                onSelectEnd = viewModel::endSelectDrag,
             )
             if (state.showKeyboard) {
                 KeyboardProxy(
@@ -136,29 +132,25 @@ fun TouchpadScreen(viewModel: TouchpadViewModel) {
             }
             NavigationBar(
                 keyboardActive = state.showKeyboard,
-                onBack         = { viewModel.pressKey(AKeyEvent.KEYCODE_BACK) },
-                onHome         = { viewModel.pressKey(AKeyEvent.KEYCODE_HOME) },
-                onRecents      = { viewModel.pressKey(AKeyEvent.KEYCODE_APP_SWITCH) },
+                onBack         = { viewModel.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) },
+                onHome         = { viewModel.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME) },
+                onRecents      = { viewModel.performGlobalAction(AccessibilityService.GLOBAL_ACTION_RECENTS) },
                 onToggleKeyboard = viewModel::toggleKeyboard,
             )
         }
     }
 }
 
-// Top status bar showing the app title, three status dots (Mouse/Display/Nav),
-// the current touch mode indicator, and contextual action buttons for each
-// unmet setup step (grant Shizuku → connect mouse → enable accessibility service).
+// Top status bar showing the app title, three status dots (Input/Display/Service),
+// the current touch mode indicator, and an action button for the one setup step
+// (enable the accessibility service) or a hint while no second display is connected.
 @Composable
 private fun StatusBar(
-    shizukuAvailable: Boolean,
-    shizukuPermission: Boolean,
-    mouseReady: Boolean,
+    inputReady: Boolean,
     serviceEnabled: Boolean,
     targetDisplay: DisplayInfo?,
     touchMode: TouchMode,
     onSettingsClick: () -> Unit,
-    onGrantShizuku: () -> Unit,
-    onConnectMouse: () -> Unit,
     onEnableService: () -> Unit,
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
@@ -172,11 +164,12 @@ private fun StatusBar(
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("AR Touchpad", color = TEXT, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    StatusDot(mouseReady, "Mouse")
+                    StatusDot(inputReady, "Input")
                     StatusDot(targetDisplay != null, "Display")
-                    StatusDot(serviceEnabled, "Nav")
+                    StatusDot(serviceEnabled, "Service")
                     val modeLabel = when (touchMode) {
                         TouchMode.SCROLL -> "↕ scroll"
+                        TouchMode.PINCH  -> "⤢ zoom"
                         TouchMode.SELECT -> "⊹ select"
                         TouchMode.CURSOR -> "⊹ cursor"
                         TouchMode.IDLE   -> null
@@ -186,20 +179,12 @@ private fun StatusBar(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                 when {
-                    !shizukuAvailable ->
-                        Text("Shizuku off", color = Color(0xFFFF7043), fontSize = 11.sp)
-                    !shizukuPermission ->
-                        TextButton(onClick = onGrantShizuku, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                            Text("Grant Shizuku", color = Color(0xFFFF7043), fontSize = 12.sp)
-                        }
-                    !mouseReady ->
-                        TextButton(onClick = onConnectMouse, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                            Text("Connect", color = Color(0xFFFFB300), fontSize = 12.sp)
-                        }
                     !serviceEnabled ->
                         TextButton(onClick = onEnableService, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)) {
-                            Text("Enable Nav", color = Color(0xFFFFB300), fontSize = 12.sp)
+                            Text("Enable Service", color = Color(0xFFFF7043), fontSize = 12.sp)
                         }
+                    targetDisplay == null ->
+                        Text("No 2nd display", color = Color(0xFFFFB300), fontSize = 11.sp)
                 }
                 IconButton(onClick = onSettingsClick) {
                     Text("⚙", color = TEXT_DIM, fontSize = 22.sp)
@@ -227,23 +212,26 @@ private fun StatusDot(active: Boolean, label: String) {
 }
 
 // The main touch surface. Intercepts raw pointer events with a single pointerInput handler:
-//   1 finger: tap (click), double-tap, long-press (right-click), long-press+drag (select text),
-//             or drag (cursor move).
-//   2 fingers: pinch (spread > translate → font zoom) or drag (translate > spread → scroll).
+//   1 finger: tap (click), double-tap, long-press (held finger on the glasses → context
+//             menu on release, or selection / drag when moved), or drag (cursor move).
+//   2 fingers: pinch (spread > translate → zoom) or drag (translate > spread → scroll).
+//             The mode is locked for the whole two-finger contact because each one is a
+//             continuous gesture on the glasses that can't flip mid-stroke.
 // Renders a dot grid and live touch point indicators on a Canvas.
 @Composable
 private fun TouchpadSurface(
     modifier: Modifier,
     enabled: Boolean,
+    serviceEnabled: Boolean,
     onMoveCursor: (Float, Float) -> Unit,
     onClick: () -> Unit,
     onDoubleClick: () -> Unit,
-    onRightClick: () -> Unit,
+    onLongPress: () -> Unit,
+    onLongPressRelease: (selected: Boolean) -> Unit,
     onScroll: (Float, Float) -> Unit,
     onPinch: (Float) -> Unit,
+    onTwoFingerEnd: () -> Unit,
     onTouchModeChanged: (TouchMode) -> Unit,
-    onSelectStart: () -> Unit,
-    onSelectEnd: () -> Unit,
 ) {
     var touchPoints by remember { mutableStateOf(listOf<Offset>()) }
     val haptic = LocalHapticFeedback.current
@@ -267,6 +255,12 @@ private fun TouchpadSurface(
                     var isLongPress = false
                     var isSelectMode = false
                     var longPressJob: Job? = null
+                    // Two-finger classification: null until the fingers have clearly either
+                    // spread/pinched or translated; then locked until a finger lifts.
+                    var twoFingerMode: TouchMode? = null
+                    var twoFingerSpanAccum = 0f
+                    var twoFingerMoveAccum = 0f
+                    var prevPressedCount = 0
 
                     coroutineScope {
                         val scope = this  // CoroutineScope for launching the long-press timer
@@ -281,6 +275,16 @@ private fun TouchpadSurface(
 
                                 touchPoints = pressed.map { it.position }
 
+                                // Leaving a two-finger contact (to one finger or none) lifts the
+                                // synthetic finger(s) held on the glasses.
+                                if (prevPressedCount == 2 && pressed.size != 2) {
+                                    if (twoFingerMode != null) onTwoFingerEnd()
+                                    twoFingerMode = null
+                                    twoFingerSpanAccum = 0f
+                                    twoFingerMoveAccum = 0f
+                                }
+                                prevPressedCount = pressed.size
+
                                 if (justPressed.isNotEmpty() && pressed.size == 1) {
                                     longPressJob?.cancel()
                                     isLongPress = false
@@ -289,11 +293,13 @@ private fun TouchpadSurface(
                                     didMove = false
                                     lastPositions = pressed.associate { it.id to it.position }
                                     // Timer fires after LONG_PRESS_MS if finger hasn't moved;
-                                    // haptic confirms entry; subsequent drag transitions into select mode.
+                                    // haptic confirms entry and a finger goes down on the glasses.
+                                    // Releasing → long press there; dragging → selection drag.
                                     longPressJob = scope.launch {
                                         delay(LONG_PRESS_MS)
                                         isLongPress = true
                                         haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        onLongPress()
                                     }
                                 }
 
@@ -307,11 +313,10 @@ private fun TouchpadSurface(
                                             val moved = abs(dx) > MOVE_THRESHOLD || abs(dy) > MOVE_THRESHOLD
 
                                             // After long press fired: first movement enters select mode
-                                            // (BTN_LEFT pressed; subsequent moves extend text selection).
+                                            // (the glasses finger stays down and follows the cursor).
                                             if (isLongPress && !isSelectMode && moved) {
                                                 isSelectMode = true
                                                 didMove = true
-                                                onSelectStart()
                                                 onTouchModeChanged(TouchMode.SELECT)
                                             }
                                             // Before long press fires: movement cancels the timer → normal drag.
@@ -331,8 +336,12 @@ private fun TouchpadSurface(
                                         p.consume()
                                     }
                                     2 -> {
-                                        // Second finger cancels any in-progress select drag.
-                                        if (isSelectMode) { onSelectEnd(); isSelectMode = false }
+                                        // Second finger lifts any finger held on the glasses by a long press.
+                                        if (isLongPress) {
+                                            onLongPressRelease(isSelectMode)
+                                            isLongPress = false
+                                            isSelectMode = false
+                                        }
                                         longPressJob?.cancel()
 
                                         val newPositions = pressed.associate { it.id to it.position }
@@ -350,14 +359,31 @@ private fun TouchpadSurface(
                                                 val prevSpan = sqrt(pdx * pdx + pdy * pdy)
                                                 val currSpan = sqrt(cdx * cdx + cdy * cdy)
                                                 val dSpan = currSpan - prevSpan
-                                                // When fingers spread/contract more than they translate, it's a pinch.
-                                                // Otherwise treat as scroll.
-                                                if (abs(dSpan) > abs(dx) + abs(dy)) {
-                                                    if (dSpan != 0f) { onPinch(dSpan); didMove = true }
-                                                } else if (dx != 0f || dy != 0f) {
-                                                    onScroll(dx, dy)
-                                                    onTouchModeChanged(TouchMode.SCROLL)
-                                                    didMove = true
+
+                                                // Decide once per contact: whichever of span change or
+                                                // translation first accumulates past the threshold wins.
+                                                if (twoFingerMode == null) {
+                                                    twoFingerSpanAccum += abs(dSpan)
+                                                    twoFingerMoveAccum += abs(dx) + abs(dy)
+                                                    if (twoFingerSpanAccum > TWO_FINGER_DECIDE_PX &&
+                                                        twoFingerSpanAccum > twoFingerMoveAccum) {
+                                                        twoFingerMode = TouchMode.PINCH
+                                                    } else if (twoFingerMoveAccum > TWO_FINGER_DECIDE_PX) {
+                                                        twoFingerMode = TouchMode.SCROLL
+                                                    }
+                                                }
+                                                when (twoFingerMode) {
+                                                    TouchMode.PINCH -> if (dSpan != 0f) {
+                                                        onPinch(dSpan)
+                                                        onTouchModeChanged(TouchMode.PINCH)
+                                                        didMove = true
+                                                    }
+                                                    TouchMode.SCROLL -> if (dx != 0f || dy != 0f) {
+                                                        onScroll(dx, dy)
+                                                        onTouchModeChanged(TouchMode.SCROLL)
+                                                        didMove = true
+                                                    }
+                                                    else -> {}
                                                 }
                                             }
                                         }
@@ -372,8 +398,7 @@ private fun TouchpadSurface(
                                     onTouchModeChanged(TouchMode.IDLE)
 
                                     when {
-                                        isSelectMode -> onSelectEnd()
-                                        !didMove && duration >= LONG_PRESS_MS -> onRightClick()
+                                        isLongPress -> onLongPressRelease(isSelectMode)
                                         !didMove && duration < TAP_MAX_MS -> {
                                             if (now - lastTapTime < DOUBLE_TAP_WINDOW_MS) {
                                                 onDoubleClick()
@@ -430,7 +455,11 @@ private fun TouchpadSurface(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Touchpad Disabled", color = TEXT_MUTED, fontSize = 18.sp)
                 Spacer(modifier = Modifier.height(4.dp))
-                Text("Grant Shizuku permission to activate", color = Color(0xFF37474F), fontSize = 14.sp)
+                Text(
+                    if (!serviceEnabled) "Enable the AR Touchpad accessibility service to activate"
+                    else "Connect the glasses in Desktop / Extended mode",
+                    color = Color(0xFF37474F), fontSize = 14.sp,
+                )
             }
         }
     }
@@ -542,14 +571,11 @@ private fun SettingsPanel(
     sensitivity: Float,
     scrollSpeed: Float,
     naturalScroll: Boolean,
-    dexKeyboard: Boolean,
-    dexKeyboardActive: Boolean,
     allDisplays: List<DisplayInfo>,
     targetDisplay: DisplayInfo?,
     onSensitivity: (Float) -> Unit,
     onScrollSpeed: (Float) -> Unit,
     onNaturalScroll: (Boolean) -> Unit,
-    onDexKeyboard: (Boolean) -> Unit,
     onDismiss: () -> Unit,
 ) {
     Column(
@@ -593,37 +619,6 @@ private fun SettingsPanel(
             )
         }
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                Text("Keyboard on Phone", color = TEXT_DIM, fontSize = 14.sp)
-                Text(
-                    when {
-                        dexKeyboard && dexKeyboardActive ->
-                            "Glasses text fields open the phone keyboard (DeX style)"
-                        dexKeyboard && targetDisplay != null ->
-                            "Not supported on this device — using proxy keyboard"
-                        else ->
-                            "Off: keyboard opens on the glasses; use ⌨ for the proxy"
-                    },
-                    color = TEXT_MUTED, fontSize = 11.sp,
-                )
-            }
-            Switch(
-                checked = dexKeyboard,
-                onCheckedChange = onDexKeyboard,
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = ACCENT,
-                    checkedTrackColor = ACCENT_DIM,
-                    uncheckedThumbColor = TEXT_DIM,
-                    uncheckedTrackColor = Color(0xFF263545),
-                ),
-            )
-        }
-
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Displays", color = TEXT_MUTED, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             if (allDisplays.isEmpty()) {
@@ -653,10 +648,11 @@ private fun SettingsPanel(
             GestureHint("1 finger drag", "Move cursor")
             GestureHint("1 finger tap", "Left click")
             GestureHint("1 finger double-tap", "Double click")
-            GestureHint("1 finger long-press", "Right click")
-            GestureHint("1 finger long-press + drag", "Select text")
+            GestureHint("1 finger long-press", "Long press / context menu")
+            GestureHint("1 finger long-press + drag", "Select text / drag")
             GestureHint("2 finger drag", "Scroll")
-            GestureHint("2 finger pinch", "Zoom page")
+            GestureHint("2 finger pinch", "Zoom")
+            GestureHint("⌨ Keys", "Type into the focused field on the glasses")
         }
     }
 }
